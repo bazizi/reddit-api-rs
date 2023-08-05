@@ -163,11 +163,11 @@ pub struct Oembed {
     pub height: i64,
     pub width: i64,
     pub html: String,
-    pub author_name: String,
+    pub author_name: Option<String>,
     pub provider_name: String,
     pub thumbnail_url: String,
     pub thumbnail_height: i64,
-    pub author_url: String,
+    pub author_url: Option<String>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -329,9 +329,9 @@ pub struct Oembed2 {
     pub height: i64,
     pub width: i64,
     pub html: String,
-    pub author_name: String,
+    pub author_name: Option<String>,
     pub provider_name: String,
     pub thumbnail_url: String,
     pub thumbnail_height: i64,
-    pub author_url: String,
+    pub author_url: Option<String>,
 }

@@ -13,4 +13,5 @@ pub struct AuthToken {
     pub token_type: String,
     pub expires_in: u64,
     pub scope: String,
+    pub refresh_token: String,
 }

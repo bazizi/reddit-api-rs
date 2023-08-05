@@ -1,3 +1,6 @@
+use std::fs::File;
+use std::io::Read;
+
 /*
 Description:
     OAuth authorization to Reddit using Rust
@@ -8,7 +11,9 @@ Useful docs:
     https://www.reddit.com/dev/api/oauth#GET_subreddits_{where}
 */
 use log::info;
+use log::warn;
 use reqwest::Client;
+use std::io::Write;
 use webbrowser;
 
 mod serializables;
@@ -19,38 +24,93 @@ use serializables::user::*;
 mod auth;
 use auth::constants::*;
 
-use axum::{extract::Query, response::Html, routing::get, Router};
+use axum::{
+    extract::{Query, State},
+    response::Html,
+    routing::get,
+    Router,
+};
+
+use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
+
+const REFRESH_TOKEN_FILE: &str = ".refresh_token";
+
+#[derive(PartialEq)]
+enum GrantType {
+    AuthCode,
+    RefreshToken,
+}
+
+const PARAMS_GRANT_TYPE_AUTH_CODE: &str =
+    "grant_type=authorization_code&code={CODE}&redirect_uri=http://{REDIRECT_URI}";
+const PARAMS_GRANT_TYPE_REFRESH_TOKEN: &str = "grant_type=refresh_token&refresh_token={CODE}";
 
 const REDIRECT_SERVER: &str = "127.0.0.1:8080";
 const REDDIT_URL: &str = "https://www.reddit.com";
 const REDDIT_API_BASE_URL: &str = "https://oauth.reddit.com";
 
+const API_AUTHORIZE: &str = concat!(
+    "/api/v1/authorize?client_id={CLIENT_ID}&response_type=code",
+    "&state={NONCE}&redirect_uri=http://{REDIRECT_SERVER}&duration=permanent&scope=read"
+);
 const API_PATH_ACCESS_TOKEN: &str = "/api/v1/access_token";
 const API_PATH_SUBREDDIT_POSTS: &str = "/r/{SUBREDDIT}/new";
 const API_PATH_SUBREDDIT_USER: &str = "/user/{REDDIT_USER}/about";
 
+#[derive(Clone)]
+struct AppState {
+    nonce: String,
+    client: Client,
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
+    let state = AppState {
+        nonce: thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(30)
+            .map(char::from)
+            .collect(),
+        client: reqwest::Client::new(),
+    };
 
     // build our application with a route
     let app = Router::new()
         // `GET /` goes to `root`
-        .route("/", get(root));
+        .route("/", get(root))
+        .with_state(state.clone());
 
-    webbrowser::open(
-        format!(
-            concat!(
-            "{REDDIT_URL}/api/v1/authorize?client_id={CLIENT_ID}&response_type=code",
-            "&state=terminator&redirect_uri=http://{REDIRECT_SERVER}&duration=temporary&scope=read"
-        ),
-            REDDIT_URL = REDDIT_URL,
-            CLIENT_ID = CLIENT_ID,
-            REDIRECT_SERVER = REDIRECT_SERVER
-        )
-        .as_str(),
-    )
-    .unwrap();
+    let f = File::open(REFRESH_TOKEN_FILE);
+
+    if f.is_ok() {
+        info!(
+            "Attempting to read refresh token from file [{}]",
+            REFRESH_TOKEN_FILE
+        );
+        let mut refresh_token = String::new();
+        f.unwrap().read_to_string(&mut refresh_token).unwrap();
+        if !refresh_token.is_empty() {
+            let token = get_and_cache_token(&state.client, &refresh_token, GrantType::RefreshToken)
+                .await
+                .access_token;
+            info!("{}", get_subreddit_post_users(&state.client, &token).await);
+            return;
+        }
+    }
+
+    let auth_url = format!(
+        "{REDDIT_URL}{API_AUTHORIZE}",
+        REDDIT_URL = REDDIT_URL,
+        API_AUTHORIZE = API_AUTHORIZE
+            .replace("{CLIENT_ID}", CLIENT_ID)
+            .replace("{NONCE}", &state.nonce)
+            .replace("{REDIRECT_SERVER}", REDIRECT_SERVER)
+    );
+
+    info!("Redirecting user to URL=[{}]", auth_url);
+    webbrowser::open(auth_url.as_str()).unwrap();
 
     info!("Server starting at [{}] ...", REDIRECT_SERVER);
 
@@ -60,23 +120,13 @@ async fn main() {
         .unwrap();
 }
 
-async fn root(query: Query<AuthParams>) -> Html<String> {
-    info!(
-        "Auth params retrieved: state=[{}], code=[{}]",
-        query.state, query.code
-    );
-
-    let client = reqwest::Client::new();
-
-    let access_token = get_token(&client, &query.code).await.access_token;
-
+async fn get_subreddit_post_users(client: &Client, access_token: &String) -> String {
     let subreddit_posts = oath_get(
         &client,
         API_PATH_SUBREDDIT_POSTS.replace("{SUBREDDIT}", "gaming"),
         &access_token,
     )
     .await;
-
     let subreddit_posts: SubredditPosts = serde_json::from_str(&subreddit_posts).unwrap();
 
     let mut html = String::new();
@@ -103,10 +153,26 @@ async fn root(query: Query<AuthParams>) -> Html<String> {
         )
         .as_str();
     }
+    html
+}
+
+async fn root(query: Query<AuthParams>, State(state): State<AppState>) -> Html<String> {
+    info!(
+        "Auth params retrieved: state=[{}], code=[{}]",
+        query.state, query.code
+    );
+
+    if state.nonce != query.code {
+        warn!("Invalid state ([{}] != [{}])", state.nonce, query.code);
+    }
+
+    let access_token = get_and_cache_token(&state.client, &query.code, GrantType::AuthCode)
+        .await
+        .access_token;
 
     Html(format!(
         "{:?}<h1>You can now close this browser tab...</h1>",
-        html
+        get_subreddit_post_users(&state.client, &access_token).await
     ))
 }
 
@@ -136,20 +202,30 @@ async fn oath_get(client: &Client, api_path: String, access_token: &String) -> S
     data
 }
 
-async fn get_token(client: &Client, auth_code: &String) -> AuthToken {
-    let auth_request = format!(
-        "grant_type=authorization_code&code={CODE}&redirect_uri=http://{REDIRECT_URI}",
-        REDIRECT_URI = REDIRECT_SERVER,
-        CODE = auth_code
-    );
+async fn get_and_cache_token(
+    client: &Client,
+    auth_code: &String,
+    grant_type: GrantType,
+) -> AuthToken {
+    let auth_request = if grant_type == GrantType::AuthCode {
+        PARAMS_GRANT_TYPE_AUTH_CODE
+            .replace("{REDIRECT_URI}", REDIRECT_SERVER)
+            .replace("{CODE}", auth_code)
+    } else {
+        PARAMS_GRANT_TYPE_REFRESH_TOKEN.replace("{CODE}", &auth_code)
+    };
 
     info!(
-        "Sending auth request [{auth_request}]",
-        auth_request = auth_request
+        "Sending auth request [{AUTH_REQUEST}]",
+        AUTH_REQUEST = auth_request
     );
 
     let res = client
-        .post(format!("{REDDIT_URL}", REDDIT_URL = REDDIT_URL) + API_PATH_ACCESS_TOKEN)
+        .post(format!(
+            "{REDDIT_URL}{API_PATH_ACCESS_TOKEN}",
+            REDDIT_URL = REDDIT_URL,
+            API_PATH_ACCESS_TOKEN = API_PATH_ACCESS_TOKEN
+        ))
         .body(auth_request)
         .basic_auth(CLIENT_ID, Some(CLIENT_SECRET))
         .header(reqwest::header::USER_AGENT, "reqwest")
@@ -158,7 +234,10 @@ async fn get_token(client: &Client, auth_code: &String) -> AuthToken {
         .unwrap();
 
     let resp_text = res.text().await.unwrap();
+    info!("Retrieved auth info: [{:?}]", resp_text);
     let auth_token: AuthToken = serde_json::from_str(&resp_text).unwrap();
-    info!("Retrieved auth info: [{:?}]", auth_token);
+
+    let mut f = File::create(REFRESH_TOKEN_FILE).unwrap();
+    write!(f, "{}", auth_token.refresh_token).unwrap();
     auth_token
 }
