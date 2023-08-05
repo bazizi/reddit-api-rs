@@ -1,0 +1,60 @@
+{
+	"info": {
+		"_postman_id": "9364c46c-7b63-49fc-bbbe-20ebce3bac52",
+		"name": "Reddit",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "2604149"
+	},
+	"item": [
+		{
+			"name": "/r/{{REDDIT_SUBREDDIT}}/new",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{REDDIT_TOKEN}}",
+						"type": "text"
+					}
+				],
+				"url": {
+					"raw": "{{REDDIT_API_BASE_URL}}/r/{{REDDIT_SUBREDDIT}}/new",
+					"host": [
+						"{{REDDIT_API_BASE_URL}}"
+					],
+					"path": [
+						"r",
+						"{{REDDIT_SUBREDDIT}}",
+						"new"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "/user/{{REDDIT_USER}}/about",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{REDDIT_TOKEN}}",
+						"type": "text"
+					}
+				],
+				"url": {
+					"raw": "{{REDDIT_API_BASE_URL}}/user/{{REDDIT_USER}}/about",
+					"host": [
+						"{{REDDIT_API_BASE_URL}}"
+					],
+					"path": [
+						"user",
+						"{{REDDIT_USER}}",
+						"about"
+					]
+				}
+			},
+			"response": []
+		}
+	]
+}
