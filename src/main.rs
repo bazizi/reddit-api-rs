@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::Read;
 
+use log::error;
 /*
 Description:
     OAuth authorization to Reddit using Rust
@@ -41,6 +42,8 @@ enum GrantType {
     AuthCode,
     RefreshToken,
 }
+
+use anyhow::Result;
 
 const PARAMS_GRANT_TYPE_AUTH_CODE: &str =
     "grant_type=authorization_code&code={CODE}&redirect_uri=http://{REDIRECT_URI}";
@@ -84,19 +87,31 @@ async fn main() {
 
     let f = File::open(REFRESH_TOKEN_FILE);
 
-    if f.is_ok() {
+    if let Ok(mut f) = f {
         info!(
             "Attempting to read refresh token from file [{}]",
             REFRESH_TOKEN_FILE
         );
         let mut refresh_token = String::new();
-        f.unwrap().read_to_string(&mut refresh_token).unwrap();
-        if !refresh_token.is_empty() {
-            let token = get_and_cache_token(&state.client, &refresh_token, GrantType::RefreshToken)
-                .await
-                .access_token;
-            info!("{}", get_subreddit_post_users(&state.client, &token).await);
-            return;
+        if let Ok(_num_bytes_read) = f.read_to_string(&mut refresh_token) {
+            if !refresh_token.is_empty() {
+                let access_token = if let Ok(auth_token) =
+                    get_and_cache_token(&state.client, &refresh_token, GrantType::RefreshToken)
+                        .await
+                {
+                    auth_token.access_token
+                } else {
+                    error!("Error obtaining the access token");
+                    return;
+                };
+
+                if let Ok(users) = get_subreddit_post_users(&state.client, &access_token).await {
+                    info!("{}", users);
+                } else {
+                    error!("get_subreddit_post_users failed");
+                }
+                return;
+            }
         }
     }
 
@@ -120,14 +135,14 @@ async fn main() {
         .unwrap();
 }
 
-async fn get_subreddit_post_users(client: &Client, access_token: &String) -> String {
+async fn get_subreddit_post_users(client: &Client, access_token: &String) -> Result<String> {
     let subreddit_posts = oath_get(
         &client,
         API_PATH_SUBREDDIT_POSTS.replace("{SUBREDDIT}", "gaming"),
         &access_token,
     )
-    .await;
-    let subreddit_posts: SubredditPosts = serde_json::from_str(&subreddit_posts).unwrap();
+    .await?;
+    let subreddit_posts: SubredditPosts = serde_json::from_str(&subreddit_posts)?;
 
     let mut html = String::new();
 
@@ -145,15 +160,15 @@ async fn get_subreddit_post_users(client: &Client, access_token: &String) -> Str
             API_PATH_SUBREDDIT_USER.replace("{REDDIT_USER}", &subreddit_post.author),
             &access_token,
         )
-        .await;
-        let reddit_user: RedditUser = serde_json::from_str(&reddit_user).unwrap();
+        .await?;
+        let reddit_user: RedditUser = serde_json::from_str(&reddit_user)?;
         html += format!(
             r##"<p>{}</p>"##,
             reddit_user.data.subreddit.public_description
         )
         .as_str();
     }
-    html
+    Ok(html)
 }
 
 async fn root(query: Query<AuthParams>, State(state): State<AppState>) -> Html<String> {
@@ -166,9 +181,13 @@ async fn root(query: Query<AuthParams>, State(state): State<AppState>) -> Html<S
         warn!("Invalid state ([{}] != [{}])", state.nonce, query.code);
     }
 
-    let access_token = get_and_cache_token(&state.client, &query.code, GrantType::AuthCode)
-        .await
-        .access_token;
+    let access_token = if let Ok(auth_token) =
+        get_and_cache_token(&state.client, &query.code, GrantType::AuthCode).await
+    {
+        auth_token.access_token
+    } else {
+        return Html("Error obtaining the access token".to_owned());
+    };
 
     Html(format!(
         "{:?}<h1>You can now close this browser tab...</h1>",
@@ -176,7 +195,7 @@ async fn root(query: Query<AuthParams>, State(state): State<AppState>) -> Html<S
     ))
 }
 
-async fn oath_get(client: &Client, api_path: String, access_token: &String) -> String {
+async fn oath_get(client: &Client, api_path: String, access_token: &String) -> Result<String> {
     let api_full_url = format!(
         "{REDDIT_API_BASE_URL}{API_PATH}",
         REDDIT_API_BASE_URL = REDDIT_API_BASE_URL,
@@ -193,20 +212,19 @@ async fn oath_get(client: &Client, api_path: String, access_token: &String) -> S
             format!("Bearer {}", access_token),
         )
         .send()
-        .await
-        .unwrap();
+        .await?;
 
-    let data = res.text().await.unwrap();
+    let data = res.text().await?;
 
     info!("Obtained data [{}]...", &data[..100]);
-    data
+    Ok(data)
 }
 
 async fn get_and_cache_token(
     client: &Client,
     auth_code: &String,
     grant_type: GrantType,
-) -> AuthToken {
+) -> Result<AuthToken> {
     let auth_request = if grant_type == GrantType::AuthCode {
         PARAMS_GRANT_TYPE_AUTH_CODE
             .replace("{REDIRECT_URI}", REDIRECT_SERVER)
@@ -230,14 +248,13 @@ async fn get_and_cache_token(
         .basic_auth(CLIENT_ID, Some(CLIENT_SECRET))
         .header(reqwest::header::USER_AGENT, "reqwest")
         .send()
-        .await
-        .unwrap();
+        .await?;
 
-    let resp_text = res.text().await.unwrap();
+    let resp_text = res.text().await?;
     info!("Retrieved auth info: [{:?}]", resp_text);
-    let auth_token: AuthToken = serde_json::from_str(&resp_text).unwrap();
+    let auth_token: AuthToken = serde_json::from_str(&resp_text)?;
 
-    let mut f = File::create(REFRESH_TOKEN_FILE).unwrap();
-    write!(f, "{}", auth_token.refresh_token).unwrap();
-    auth_token
+    let mut f = File::create(REFRESH_TOKEN_FILE)?;
+    write!(f, "{}", auth_token.refresh_token)?;
+    Ok(auth_token)
 }
